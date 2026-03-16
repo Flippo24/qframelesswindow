@@ -71,7 +71,18 @@ class LinuxFramelessWindowBase:
 
     def eventFilter(self, obj, event):
         et = event.type()
-        if et != QEvent.MouseButtonPress and et != QEvent.MouseMove or not self._isResizeEnabled:
+        if not self._isResizeEnabled:
+            return False
+        if et not in (
+            QEvent.MouseButtonPress,
+            QEvent.MouseButtonRelease,
+            QEvent.MouseMove,
+            QEvent.Leave,
+        ):
+            return False
+        if et == QEvent.Leave:
+            # Reset stale resize cursor when leaving the frameless window area.
+            self.setCursor(Qt.ArrowCursor)
             return False
 
         edges = Qt.Edge(0)
@@ -85,8 +96,8 @@ class LinuxFramelessWindowBase:
         if pos.y() >= self.height()-self.BORDER_WIDTH:
             edges |= Qt.BottomEdge
 
-        # change cursor
-        if et == QEvent.MouseMove and self.windowState() == Qt.WindowNoState:
+        # Keep cursor state in sync during and after resize interactions.
+        if et in (QEvent.MouseMove, QEvent.MouseButtonRelease) and self.windowState() == Qt.WindowNoState:
             if edges in (Qt.LeftEdge | Qt.TopEdge, Qt.RightEdge | Qt.BottomEdge):
                 self.setCursor(Qt.SizeFDiagCursor)
             elif edges in (Qt.RightEdge | Qt.TopEdge, Qt.LeftEdge | Qt.BottomEdge):
