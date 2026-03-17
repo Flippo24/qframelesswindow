@@ -1,5 +1,6 @@
 # coding:utf-8
-from PySide6.QtCore import QCoreApplication, QEvent, Qt, QSize, QRect
+from PySide6.QtCore import QCoreApplication, QEvent, Qt, QSize, QRect, QPoint, QTimer
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QWidget, QMainWindow, QDialog
 
 from ..titlebar import TitleBar
@@ -27,6 +28,60 @@ class LinuxFramelessWindowBase:
         self.titleBar.raise_()
         self.resize(500, 500)
 
+    def _windowRect(self) -> QRect:
+        """Return the window rect in global coordinates."""
+        return QRect(self.mapToGlobal(QPoint(0, 0)), self.size())
+
+    def _edgesAt(self, globalPos) -> Qt.Edges:
+        """Return resize edges for a global cursor position."""
+        if (
+            not self._isResizeEnabled
+            or not self.isVisible()
+            or self.windowState() != Qt.WindowNoState
+        ):
+            return Qt.Edge(0)
+
+        rect = self._windowRect()
+        if not rect.contains(globalPos):
+            return Qt.Edge(0)
+
+        x = globalPos.x() - rect.x()
+        y = globalPos.y() - rect.y()
+        edges = Qt.Edge(0)
+
+        if x < self.BORDER_WIDTH:
+            edges |= Qt.LeftEdge
+        elif x >= rect.width() - self.BORDER_WIDTH:
+            edges |= Qt.RightEdge
+
+        if y < self.BORDER_WIDTH:
+            edges |= Qt.TopEdge
+        elif y >= rect.height() - self.BORDER_WIDTH:
+            edges |= Qt.BottomEdge
+
+        return edges
+
+    def _cursorShapeForEdges(self, edges):
+        """Map resize edges to the matching cursor shape."""
+        if edges in (Qt.LeftEdge | Qt.TopEdge, Qt.RightEdge | Qt.BottomEdge):
+            return Qt.SizeFDiagCursor
+        if edges in (Qt.RightEdge | Qt.TopEdge, Qt.LeftEdge | Qt.BottomEdge):
+            return Qt.SizeBDiagCursor
+        if edges in (Qt.TopEdge, Qt.BottomEdge):
+            return Qt.SizeVerCursor
+        if edges in (Qt.LeftEdge, Qt.RightEdge):
+            return Qt.SizeHorCursor
+        return Qt.ArrowCursor
+
+    def _syncResizeCursor(self):
+        """Keep the top-level cursor aligned with the current pointer position."""
+        self.setCursor(self._cursorShapeForEdges(self._edgesAt(QCursor.pos())))
+
+    def _scheduleCursorSync(self):
+        """Refresh again after native move/resize handling settles."""
+        for delay in (0, 50, 150):
+            QTimer.singleShot(delay, self._syncResizeCursor)
+
     def updateFrameless(self):
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
 
@@ -50,6 +105,8 @@ class LinuxFramelessWindowBase:
     def setResizeEnabled(self, isEnabled: bool):
         """ set whether resizing is enabled """
         self._isResizeEnabled = isEnabled
+        if not isEnabled:
+            self.setCursor(Qt.ArrowCursor)
 
     def isSystemButtonVisible(self):
         """ Returns whether the system title bar button is visible """
@@ -71,46 +128,29 @@ class LinuxFramelessWindowBase:
 
     def eventFilter(self, obj, event):
         et = event.type()
-        if not self._isResizeEnabled:
+
+        if obj is self and et in (QEvent.Move, QEvent.Resize, QEvent.WindowStateChange, QEvent.Show, QEvent.Hide):
+            self._syncResizeCursor()
             return False
+
         if et not in (
+            QEvent.Enter,
+            QEvent.Leave,
             QEvent.MouseButtonPress,
             QEvent.MouseButtonRelease,
             QEvent.MouseMove,
-            QEvent.Leave,
         ):
             return False
-        if et == QEvent.Leave:
-            # Reset stale resize cursor when leaving the frameless window area.
-            self.setCursor(Qt.ArrowCursor)
-            return False
 
-        edges = Qt.Edge(0)
-        pos = event.globalPos() - self.pos()
-        if pos.x() < self.BORDER_WIDTH:
-            edges |= Qt.LeftEdge
-        if pos.x() >= self.width()-self.BORDER_WIDTH:
-            edges |= Qt.RightEdge
-        if pos.y() < self.BORDER_WIDTH:
-            edges |= Qt.TopEdge
-        if pos.y() >= self.height()-self.BORDER_WIDTH:
-            edges |= Qt.BottomEdge
+        self._syncResizeCursor()
 
-        # Keep cursor state in sync during and after resize interactions.
-        if et in (QEvent.MouseMove, QEvent.MouseButtonRelease) and self.windowState() == Qt.WindowNoState:
-            if edges in (Qt.LeftEdge | Qt.TopEdge, Qt.RightEdge | Qt.BottomEdge):
-                self.setCursor(Qt.SizeFDiagCursor)
-            elif edges in (Qt.RightEdge | Qt.TopEdge, Qt.LeftEdge | Qt.BottomEdge):
-                self.setCursor(Qt.SizeBDiagCursor)
-            elif edges in (Qt.TopEdge, Qt.BottomEdge):
-                self.setCursor(Qt.SizeVerCursor)
-            elif edges in (Qt.LeftEdge, Qt.RightEdge):
-                self.setCursor(Qt.SizeHorCursor)
-            else:
-                self.setCursor(Qt.ArrowCursor)
-
-        elif obj in (self, self.titleBar) and et == QEvent.MouseButtonPress and edges:
-            LinuxMoveResize.starSystemResize(self, event.globalPos(), edges)
+        if obj in (self, self.titleBar) and et == QEvent.MouseButtonPress:
+            edges = self._edgesAt(event.globalPos())
+            if edges:
+                LinuxMoveResize.starSystemResize(self, event.globalPos(), edges)
+                self._scheduleCursorSync()
+        elif et == QEvent.MouseButtonRelease:
+            self._scheduleCursorSync()
 
         return False
 
